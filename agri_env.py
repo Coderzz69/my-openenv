@@ -15,19 +15,23 @@ from gymnasium import spaces
 #  Constants & Configuration
 # ──────────────────────────────────────────────
 
-MAX_STEPS = 200          # episode length
-ALPHA     = 0.1          # cost penalty weight in the reward function
+MAX_STEPS        = 140          # Standard tomato growth cycle from seedling to final harvest
+ALPHA            = 0.5          # Weighting factor to balance yield maximization with energy conservation
 
 # Observation bounds  [soil_moist, N, P, K, temp, humidity, pest, energy_price]
-OBS_LOW  = np.array([0.0, 0.0, 0.0, 0.0, 10.0,  0.0, 0.0, 1.0], dtype=np.float32)
-OBS_HIGH = np.array([1.0, 1.0, 1.0, 1.0, 50.0, 100.0, 1.0, 10.0], dtype=np.float32)
+# Temp range reflects actual sensor data from 7.5°C to 45.2°C
+# Energy price reflects 2025 industrial/commercial tariffs (approx. 1–17 units)
+OBS_LOW  = np.array([0.0, 0.0, 0.0, 0.0, 7.5,  0.0, 0.0, 1.0], dtype=np.float32)
+OBS_HIGH = np.array([1.0, 1.0, 1.0, 1.0, 45.0, 100.0, 1.0, 17.0], dtype=np.float32)
 
 # Action bounds  [irrigation, N_inj, P_inj, K_inj, CO2, pesticide]
+# Irrigation: Mature plants require up to 2,000–3,000 mL/day
+# CO2: Enrichment is effective up to 1,200 ppm; higher levels can be phytotoxic
 ACT_LOW  = np.array([0.0, 0.0, 0.0, 0.0, 300.0, 0.0], dtype=np.float32)
-ACT_HIGH = np.array([500.0, 0.5, 0.5, 0.5, 800.0, 1.0], dtype=np.float32)
+ACT_HIGH = np.array([3000.0, 0.5, 0.5, 0.5, 1200.0, 1.0], dtype=np.float32)
 
-# Optimal moisture for crop growth (Gaussian-like scoring around this)
-OPTIMAL_MOISTURE = 0.6
+# Optimal moisture for crop growth (target 70% of field capacity)
+OPTIMAL_MOISTURE = 0.7
 
 
 # ──────────────────────────────────────────────
