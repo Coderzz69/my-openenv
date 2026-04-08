@@ -11,6 +11,10 @@ from agri_env.models import Action, Observation
 from server.agri_environment import AgriEnvironment
 
 
+# Enable the built-in OpenEnv web UI unless explicitly disabled.
+os.environ.setdefault("ENABLE_WEB_INTERFACE", "true")
+
+
 app = create_app(
     AgriEnvironment,
     Action,
