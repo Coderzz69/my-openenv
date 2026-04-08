@@ -89,6 +89,13 @@ The scalar reward is returned through the OpenEnv observation contract, and a de
 
 Each task has a deterministic grader in `[0, 1]`.
 
+The grader score combines:
+
+- cumulative yield
+- efficiency (`yield / cost`)
+- stability
+- task-specific control quality such as moisture accuracy, nutrient balance, pest suppression, and budget retention
+
 ## OpenEnv usage
 
 ### Local server
@@ -132,9 +139,10 @@ with AgriEnvClient(base_url="http://127.0.0.1:8000").sync() as env:
 ### Run the baseline locally
 
 ```bash
-export HF_TOKEN=dummy
-python3 inference.py --task hard --policy baseline
+python3 inference.py --policy baseline
 ```
+
+By default, `inference.py` runs the deterministic baseline across all three tasks and emits one `[START] ... [STEP] ... [END]` block per task.
 
 ### Run the baseline against a running OpenEnv server
 
@@ -151,6 +159,14 @@ export API_BASE_URL=https://router.huggingface.co/v1
 export MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct
 python3 inference.py --task hard --policy llm --base-url http://127.0.0.1:8000
 ```
+
+The inference runner reads:
+
+- `API_BASE_URL` with a default of `https://router.huggingface.co/v1`
+- `MODEL_NAME` with a default of `meta-llama/Llama-3.1-8B-Instruct`
+- `HF_TOKEN` with no default
+
+For compatibility with common local setups, it also accepts `OPENAI_API_KEY` or `API_KEY` as fallbacks for the token.
 
 ## Deployment
 
@@ -181,6 +197,12 @@ Default seeded baseline scores:
 - `easy`: `0.8470`
 - `medium`: `0.8084`
 - `hard`: `0.8425`
+
+Example final log line format:
+
+```text
+[END] success=true steps=140 score=0.843 rewards=0.64,0.68,0.70,...
+```
 
 ## Notes
 

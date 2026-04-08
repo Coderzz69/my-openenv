@@ -13,12 +13,18 @@ except ModuleNotFoundError:  # pragma: no cover - container installs it.
     OpenAI = None  # type: ignore[assignment]
 
 from agri_env import Action, AgriEnv, AgriEnvClient
+from agri_env.graders import grade_episode
 from agri_env.tasks import TASKS
-from agri_env.utils import compact_json, safe_error_text
+from agri_env.utils import compact_json
 
 
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+BENCHMARK = "agri-env"
+API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
+MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 
 class HeuristicPolicy:
@@ -189,119 +195,183 @@ def _extract_json_object(text: str) -> str:
 
 
 def _build_client(api_base_url: str, hf_token: str) -> Any:
-    if OpenAI is None:
+    if OpenAI is None or not hf_token:
         return None
     return OpenAI(base_url=api_base_url, api_key=hf_token)
 
 
 def _print_start(task: str, model_name: str) -> None:
-    print(f"[START] task={task} env=agri-env model={model_name}")
+    print(f"[START] task={task} env={BENCHMARK} model={model_name}")
+
+
+def _format_error_text(message: str | None) -> str:
+    if not message:
+        return "null"
+    line = str(message).replace("\r", " ").replace("\n", " ").strip()
+    return line or "null"
+
+
+def _action_log_payload(action: Action) -> str:
+    payload = action.to_dict()
+    payload.pop("metadata", None)
+    return compact_json(payload)
 
 
 def _print_step(step: int, action: Action, reward_value: float, done: bool, error: str | None) -> None:
     print(
         "[STEP] step={step} action={action} reward={reward:.2f} done={done} error={error}".format(
             step=step,
-            action=compact_json(action.to_dict()),
+            action=_action_log_payload(action),
             reward=reward_value,
             done=str(done).lower(),
-            error=safe_error_text(error),
+            error=_format_error_text(error),
         )
     )
 
 
-def _print_end(success: bool, rewards: list[float]) -> None:
+def _print_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
     formatted_rewards = ",".join(f"{value:.2f}" for value in rewards)
-    print(f"[END] success={str(success).lower()} steps={len(rewards)} rewards={formatted_rewards}")
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={formatted_rewards}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run AgriEnv inference.")
-    parser.add_argument("--task", choices=sorted(TASKS), default="hard")
+    parser.add_argument("--task", choices=["all", *TASKS], default="all")
     parser.add_argument("--policy", choices=["baseline", "llm"], default="baseline")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--base-url", default=None, help="Optional OpenEnv server base URL.")
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    api_base_url = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
-    model_name = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
-    hf_token = os.getenv("HF_TOKEN")
-    _print_start(args.task, model_name)
+def _zero_action() -> Action:
+    return Action(
+        irrigation=0.0,
+        nitrogen_injection=0.0,
+        phosphorus_injection=0.0,
+        potassium_injection=0.0,
+        co2_ppm=400.0,
+        pesticide=0.0,
+    )
 
-    if not hf_token:
-        _print_end(False, [])
-        return 1
 
+def _grader_score(grader_payload: Any) -> float:
+    if isinstance(grader_payload, dict) and "score" in grader_payload:
+        try:
+            return max(0.0, min(1.0, float(grader_payload["score"])))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _grader_passed(grader_payload: Any, task_id: str) -> bool:
+    if isinstance(grader_payload, dict) and "passed" in grader_payload:
+        return bool(grader_payload["passed"])
+    return _grader_score(grader_payload) >= TASKS[task_id].pass_threshold
+
+
+def _run_local_task(task_id: str, policy: HeuristicPolicy | OpenAIController, seed: int | None) -> tuple[bool, int, float, list[float]]:
     rewards: list[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+    env = AgriEnv(task=task_id, seed=seed)
+    _print_start(task_id, MODEL_NAME)
 
-    client = _build_client(api_base_url=api_base_url, hf_token=hf_token)
-    policy = HeuristicPolicy() if args.policy == "baseline" else OpenAIController(client=client, model_name=model_name)
-
-    success = True
-    if args.base_url:
-        with AgriEnvClient(base_url=args.base_url).sync() as env:
-            reset_result = env.reset(task=args.task, seed=args.seed)
-            observation = reset_result.observation
-            horizon = TASKS[args.task].horizon
-            for step in range(1, horizon + 1):
-                error_message = None
-                try:
-                    if args.policy == "baseline":
-                        action = policy.act(observation, args.task)  # type: ignore[union-attr]
-                    else:
-                        action, error_message = policy.act(observation, args.task)  # type: ignore[union-attr]
-                    result = env.step(action)
-                    observation = result.observation
-                    reward_value = float(result.reward or 0.0)
-                    rewards.append(reward_value)
-                    _print_step(step, action, reward_value, result.done, error_message)
-                    if result.done:
-                        break
-                except Exception as exc:
-                    success = False
-                    fallback_action = Action(
-                        irrigation=0.0,
-                        nitrogen_injection=0.0,
-                        phosphorus_injection=0.0,
-                        potassium_injection=0.0,
-                        co2_ppm=400.0,
-                        pesticide=0.0,
-                    )
-                    _print_step(step, fallback_action, 0.0, True, str(exc))
-                    break
-    else:
-        env = AgriEnv(task=args.task, seed=args.seed)
-        observation = env.reset(seed=args.seed)
+    try:
+        observation = env.reset(seed=seed, task=task_id)
         for step in range(1, env.task.horizon + 1):
             error_message = None
-            try:
-                if args.policy == "baseline":
-                    action = policy.act(observation, args.task)  # type: ignore[union-attr]
-                else:
-                    action, error_message = policy.act(observation, args.task)  # type: ignore[union-attr]
-                observation, reward, done, _info = env.step(action)
-                rewards.append(reward.total)
-                _print_step(step, action, reward.total, done, error_message)
-                if done:
-                    break
-            except Exception as exc:
-                success = False
-                fallback_action = Action(
-                    irrigation=0.0,
-                    nitrogen_injection=0.0,
-                    phosphorus_injection=0.0,
-                    potassium_injection=0.0,
-                    co2_ppm=400.0,
-                    pesticide=0.0,
-                )
-                _print_step(step, fallback_action, 0.0, True, str(exc))
+            if isinstance(policy, HeuristicPolicy):
+                action = policy.act(observation, task_id)
+            else:
+                action, error_message = policy.act(observation, task_id)
+            observation, reward, done, info = env.step(action)
+            reward_value = float(reward.total)
+            rewards.append(reward_value)
+            steps_taken = step
+            _print_step(step, action, reward_value, done, error_message)
+            if done:
+                grader_payload = info.get("grader", {})
+                score = _grader_score(grader_payload)
+                success = _grader_passed(grader_payload, task_id)
                 break
 
-    _print_end(success, rewards)
-    return 0 if success else 1
+        if steps_taken and score == 0.0:
+            grader_payload = grade_episode(env.episode_summary()).to_dict()
+            score = _grader_score(grader_payload)
+            success = _grader_passed(grader_payload, task_id)
+    except Exception as exc:
+        success = False
+        step = steps_taken + 1 if steps_taken < TASKS[task_id].horizon else TASKS[task_id].horizon
+        _print_step(step, _zero_action(), 0.0, True, str(exc))
+    finally:
+        _print_end(success, steps_taken, score, rewards)
+
+    return success, steps_taken, score, rewards
+
+
+def _run_remote_task(
+    task_id: str,
+    policy: HeuristicPolicy | OpenAIController,
+    seed: int | None,
+    base_url: str,
+) -> tuple[bool, int, float, list[float]]:
+    rewards: list[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+    _print_start(task_id, MODEL_NAME)
+
+    try:
+        with AgriEnvClient(base_url=base_url).sync() as env:
+            result = env.reset(task=task_id, seed=seed)
+            observation = result.observation
+            for step in range(1, TASKS[task_id].horizon + 1):
+                error_message = None
+                if isinstance(policy, HeuristicPolicy):
+                    action = policy.act(observation, task_id)
+                else:
+                    action, error_message = policy.act(observation, task_id)
+                result = env.step(action)
+                observation = result.observation
+                reward_value = float(result.reward or 0.0)
+                rewards.append(reward_value)
+                steps_taken = step
+                grader_payload = observation.metadata.get("grader", {})
+                _print_step(step, action, reward_value, result.done, error_message)
+                if result.done:
+                    if not grader_payload:
+                        grader_payload = env.state().grader
+                    score = _grader_score(grader_payload)
+                    success = _grader_passed(grader_payload, task_id)
+                    break
+    except Exception as exc:
+        success = False
+        step = steps_taken + 1 if steps_taken < TASKS[task_id].horizon else TASKS[task_id].horizon
+        _print_step(step, _zero_action(), 0.0, True, str(exc))
+    finally:
+        _print_end(success, steps_taken, score, rewards)
+
+    return success, steps_taken, score, rewards
+
+
+def main() -> int:
+    _ = LOCAL_IMAGE_NAME
+    args = parse_args()
+    client = _build_client(api_base_url=API_BASE_URL, hf_token=HF_TOKEN or "")
+    policy = HeuristicPolicy() if args.policy == "baseline" else OpenAIController(client=client, model_name=MODEL_NAME)
+    task_ids = list(TASKS) if args.task == "all" else [args.task]
+
+    all_success = True
+    for task_id in task_ids:
+        success, _steps, _score, _rewards = (
+            _run_remote_task(task_id, policy, args.seed, args.base_url)
+            if args.base_url
+            else _run_local_task(task_id, policy, args.seed)
+        )
+        all_success = all_success and success
+
+    return 0 if all_success else 1
 
 
 if __name__ == "__main__":

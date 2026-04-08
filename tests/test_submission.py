@@ -14,10 +14,12 @@ from server.app import app
 
 ROOT = Path(__file__).resolve().parents[1]
 STEP_PATTERN = re.compile(
-    r'^\[STEP\] step=\d+ action=\{.*\} reward=-?\d+\.\d{2} done=(true|false) error=(null|[\w.\-:]+)$'
+    r"^\[STEP\] step=\d+ action=\{.*\} reward=-?\d+\.\d{2} done=(true|false) error=.*$"
 )
 START_PATTERN = re.compile(r"^\[START\] task=(easy|medium|hard) env=agri-env model=.+$")
-END_PATTERN = re.compile(r"^\[END\] success=(true|false) steps=\d+ rewards=(-?\d+\.\d{2}(,-?\d+\.\d{2})*)?$")
+END_PATTERN = re.compile(
+    r"^\[END\] success=(true|false) steps=\d+ score=\d+\.\d{3} rewards=(-?\d+\.\d{2}(,-?\d+\.\d{2})*)?$"
+)
 
 
 class AgriEnvSubmissionTests(unittest.TestCase):
@@ -91,7 +93,6 @@ class AgriEnvSubmissionTests(unittest.TestCase):
 
     def test_inference_baseline_output_format(self) -> None:
         env = os.environ.copy()
-        env["HF_TOKEN"] = "dummy"
         completed = subprocess.run(
             [sys.executable, "inference.py", "--task", "easy", "--policy", "baseline"],
             cwd=ROOT,
@@ -107,6 +108,21 @@ class AgriEnvSubmissionTests(unittest.TestCase):
         for line in lines[1:-1]:
             self.assertRegex(line, STEP_PATTERN)
         self.assertIn("done=true", lines[-2])
+
+    def test_inference_default_runs_all_tasks(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "inference.py", "--policy", "baseline"],
+            cwd=ROOT,
+            env=os.environ.copy(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        start_tasks = [line.split()[1].split("=", 1)[1] for line in lines if line.startswith("[START]")]
+        self.assertEqual(sum(1 for line in lines if line.startswith("[START]")), 3)
+        self.assertEqual(sum(1 for line in lines if line.startswith("[END]")), 3)
+        self.assertEqual(start_tasks, ["easy", "medium", "hard"])
 
 
 if __name__ == "__main__":
